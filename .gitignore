@@ -91,3 +91,7 @@ Trajectory_refinement/refinementMPC/acados_ocp.json
 # 시뮬레이션 산출물
 videos/
 trajectory_evaluator_results/
+
+
+*.zip
+*.mp4
