@@ -287,11 +287,11 @@ class RefinementMPC:
         #           입력이 아니라 상태인지 생각해 보라 (jerk 와 조향속도에 직접
         #           제약을 걸기 위해서다 — 빈칸 2-⑤ 에서 다시 나온다).
         # 채우지 않아도 빌드와 주행은 되지만 자차가 제자리에 머문다.
-        yaw_dot = 0.0 * v       # TODO
+        yaw_dot = v * tan(delta) / self.wheel_base
 
         f_expl = vertcat(
-            0.0 * v,        # TODO pos_x_dot
-            0.0 * v,        # TODO pos_y_dot
+            v * cos(yaw),  # pos_x_dot
+            v * sin(yaw),  # pos_y_dot
             yaw_dot,        # yaw_dot
             ax,             # v_dot
             jerk,           # ax_dot
@@ -465,10 +465,10 @@ class RefinementMPC:
         # jerk_mag 는 예시로 채워 두었다 — 종저크(jerk)와 횡저크(= ay 의 시간미분)의
         # 제곱합이며, nuPlan 의 magnitude jerk 에 대응한다.
         # 채우지 않으면 comfort 제약 4개 중 3개가 상수 0 이 되어 무력해진다.
-        ay        = 0.0 * v     # TODO
+        ay        = (v**2) * tan(delta) / self.wheel_base
         jerk_mag  = jerk**2 + ((2 * v * ax * delta + (v**2) * ddelta) / self.wheel_base) ** 2
-        yawrate   = 0.0 * v     # TODO
-        yaw_accel = 0.0 * v     # TODO
+        yawrate   = v * tan(delta) / self.wheel_base
+        yaw_accel = (ax * delta + v * ddelta) / self.wheel_base
         # ────────────────────────────────────────────────────────────────────
 
         # Acceleration constraints
@@ -590,11 +590,11 @@ class RefinementMPC:
         # 채우지 않으면 제약이 항상 만족되어 차선 밖으로 나가도 벌점이 없다.
         LOOSE_BND = 0.0 * front_left_y + MPCConstants.Numerical.LARGE_POSITIVE
 
-        left_boundary_con1 = LOOSE_BND   # TODO Front left corner < left boundary
-        left_boundary_con2 = LOOSE_BND   # TODO Rear left corner  < left boundary
+        left_boundary_con1 = left_front_y_lim - front_left_y - self.boundary_margin
+        left_boundary_con2 = left_rear_y_lim - rear_left_y - self.boundary_margin
 
-        right_boundary_con1 = LOOSE_BND  # TODO Front right corner > right boundary
-        right_boundary_con2 = LOOSE_BND  # TODO Rear right corner  > right boundary
+        right_boundary_con1 = front_right_y - right_front_y_lim - self.boundary_margin
+        right_boundary_con2 = rear_right_y - right_rear_y_lim - self.boundary_margin
         # ────────────────────────────────────────────────────────────────────
 
         con_h_expr = vertcat(ay, jerk_mag, yawrate, yaw_accel,        # 4
@@ -689,6 +689,7 @@ class RefinementMPC:
         x_ref_idx = MPCConstants.ParameterIndices.REF_TRAJECTORY_START
         y_ref_idx = MPCConstants.ParameterIndices.REF_TRAJECTORY_START + 1
         yaw_ref_idx = MPCConstants.ParameterIndices.REF_TRAJECTORY_START + 2
+        vel_ref_idx = MPCConstants.ParameterIndices.REF_TRAJECTORY_START + 3
 
         # ============================================================
         # ORIGINAL COST FORMULATION (Quadratic with Normalization)
@@ -727,10 +728,10 @@ class RefinementMPC:
         # 그 상태로 빌드해서 §7 을 돌려 보면 커널을 쓰는 이유가 보인다 — 크게
         # 틀린 한 점이 비용을 지배해 나머지 전 구간을 끌고 간다.
         kernel_x = (tanh(self.kernel_scale_x * error_x_square + self.kernel_shift_x) + 1.0) / 2.0
-        kernel_y = error_y_square           # TODO
-        kernel_yaw = error_yaw_square       # TODO
-        kernel_jerk = error_jerk_square     # TODO
-        kernel_ddelta = error_ddelta_square # TODO
+        kernel_y = (tanh(self.kernel_scale_y * error_y_square + self.kernel_shift_y) + 1.0) / 2.0
+        kernel_yaw = (tanh(self.kernel_scale_yaw * error_yaw_square + self.kernel_shift_yaw) + 1.0) / 2.0
+        kernel_jerk = (tanh(self.kernel_scale_jerk * error_jerk_square + self.kernel_shift_jerk) + 1.0) / 2.0
+        kernel_ddelta = (tanh(self.kernel_scale_ddelta * error_ddelta_square + self.kernel_shift_ddelta) + 1.0) / 2.0
         # ────────────────────────────────────────────────────────────────────
 
         # Stage cost
@@ -746,10 +747,20 @@ class RefinementMPC:
         #            yaml 에서 Qe_* 가 전부 0 이고 use_kernel_cost_e 도 0 인 이유를
         #            생각해 보라 — 이 MPC 는 끝점을 맞추는 것이 목적이 아니다.
         # 채우지 않으면 x 방향 추종만 남아 횡방향이 기준선에서 멀어진다.
-        cost_expr = self.use_kernel_cost * (self.Q_x * kernel_x)                 # TODO
+        cost_expr = self.use_kernel_cost * (
+            self.Q_x * kernel_x +
+            self.Q_y * kernel_y +
+            self.Q_yaw * kernel_yaw +
+            self.R_jerk * kernel_jerk +
+            self.R_ddelta * kernel_ddelta
+        )
 
         # Terminal cost
-        cost_expr_ext = 0.0 * kernel_x                                           # TODO
+        cost_expr_ext = self.use_kernel_cost_e * (
+            self.Qe_x * kernel_x +
+            self.Qe_y * kernel_y +
+            self.Qe_yaw * kernel_yaw
+        )
         # ────────────────────────────────────────────────────────────────────
 
         # Store cost expressions in the OCP model
@@ -790,8 +801,8 @@ class RefinementMPC:
         LOOSE = MPCConstants.Numerical.LARGE_POSITIVE
 
         # 1) State Constraints
-        ocp.constraints.lbx = np.array([-LOOSE, -LOOSE, -LOOSE])  # TODO
-        ocp.constraints.ubx = np.array([ LOOSE,  LOOSE,  LOOSE])  # TODO
+        ocp.constraints.lbx = np.array([-0.001, self.nuplan_min_lon_accel, -np.deg2rad(self.max_delta)])
+        ocp.constraints.ubx = np.array([MPCConstants.Numerical.LARGE_POSITIVE_FOR_CALC, self.nuplan_max_lon_accel, np.deg2rad(self.max_delta)])
         ocp.constraints.idxbx = np.array([3, 4, 5])  # v, ax, delta
         ocp.dims.nbx = ocp.constraints.idxbx.shape[0]
         ocp.constraints.idxsbx = np.array([1])
@@ -810,8 +821,8 @@ class RefinementMPC:
         ocp.constraints.idxsbx_e = np.array([1])
 
         # 4) Input Constraints                                    (빈칸 2-⑤ 계속)
-        ocp.constraints.lbu = np.array([-LOOSE, -LOOSE])  # TODO
-        ocp.constraints.ubu = np.array([ LOOSE,  LOOSE])  # TODO
+        ocp.constraints.lbu = np.array([-self.max_abs_lon_jerk, -np.deg2rad(self.max_ddelta)])
+        ocp.constraints.ubu = np.array([ self.max_abs_lon_jerk,  np.deg2rad(self.max_ddelta)])
         ocp.constraints.idxbu = np.array([0, 1])
         ocp.dims.nbu = ocp.constraints.idxbu.shape[0]
         ocp.constraints.idxsbu = np.array([0])
