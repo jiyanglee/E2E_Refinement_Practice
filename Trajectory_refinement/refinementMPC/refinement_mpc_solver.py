@@ -849,8 +849,15 @@ class RefinementMPC:
         LOOSE_H = MPCConstants.Numerical.LARGE_POSITIVE
 
         # Comfort constraints
-        comfort_lh = np.full(MPCConstants.COMFORT_CONSTRAINTS, -LOOSE_H)  # TODO
-        comfort_uh = np.full(MPCConstants.COMFORT_CONSTRAINTS,  LOOSE_H)  # TODO
+        # con_h_expr front 4: (ay, jerk_mag, yawrate, yaw_accel)
+        comfort_lh = np.array([-self.nuplan_max_abs_lat_accel,
+                       -0.001,
+                       -self.nuplan_max_abs_yaw_rate,
+                       -self.nuplan_max_abs_yaw_accel])
+        comfort_uh = np.array([ self.nuplan_max_abs_lat_accel,
+                    self.nuplan_max_abs_mag_jerk ** 2,
+                    self.nuplan_max_abs_yaw_rate,
+                    self.nuplan_max_abs_yaw_accel])
 
         # Acceleration constraints
         acceleration_constraint_count = MPCConstants.ACCELERATION_CONSTRAINTS
@@ -875,8 +882,15 @@ class RefinementMPC:
         _n_h = (MPCConstants.COMFORT_CONSTRAINTS + MPCConstants.ACCELERATION_CONSTRAINTS +
                 MPCConstants.AGENT_CONSTRAINTS + MPCConstants.PEDESTRIAN_CONSTRAINTS +
                 MPCConstants.BOUNDARY_CONSTRAINTS)
-        ocp.constraints.lh = np.full(_n_h, -LOOSE_H)  # TODO
-        ocp.constraints.uh = np.full(_n_h,  LOOSE_H)  # TODO
+        # concatenate in exact order: comfort -> acceleration -> collision -> boundary
+        ocp.constraints.lh = np.concatenate((comfort_lh,
+                            acceleration_lh,
+                            collision_lh,
+                            boundary_lh))
+        ocp.constraints.uh = np.concatenate((comfort_uh,
+                            acceleration_uh,
+                            collision_uh,
+                            boundary_uh))
         ocp.dims.nh = ocp.constraints.lh.shape[0]
         # idxsh 는 채워 두었다 — 비선형 제약을 **전부 soft** 로 만든다.
         # hard 로 두면 만족하는 해가 없을 때 솔버가 아무 답도 내놓지 못한다.
@@ -1481,28 +1495,29 @@ class RefinementMPC:
         #
         # 채우지 않으면 제약이 항상 만족되어 충돌 회피가 사라진다. 그 상태로 §8 을
         # 돌려 보면 상대 차량 옆을 스치듯 지나간다.
-        collision_threshold = 0.0   # TODO ⓐ
+        # collision threshold: half width of agent + half width of ego + safety margin
+        collision_threshold = (agent.width / 2.0) + self.width_half + self.safety_margin
         eps = 0.01
         loose = 0.0 * vehicle.rear_x + MPCConstants.Numerical.LARGE_POSITIVE
 
         # Constraints 1-3: Rear axle vs agent trajectory points
-        con1 = loose   # TODO
-        con2 = loose   # TODO
-        con3 = loose   # TODO
+        con1 = sqrt((vehicle.rear_x - agent.x1)**2 + (vehicle.rear_y - agent.y1)**2 + eps**2) - collision_threshold
+        con2 = sqrt((vehicle.rear_x - agent.x2)**2 + (vehicle.rear_y - agent.y2)**2 + eps**2) - collision_threshold
+        con3 = sqrt((vehicle.rear_x - agent.x3)**2 + (vehicle.rear_y - agent.y3)**2 + eps**2) - collision_threshold
 
         # Constraints 4-6: Center vs agent trajectory points
         # con4 = (vehicle.center_x - agent.x1)**2 + (vehicle.center_y - agent.y1)**2 - collision_threshold
         # con5 = (vehicle.center_x - agent.x2)**2 + (vehicle.center_y - agent.y2)**2 - collision_threshold
         # con6 = (vehicle.center_x - agent.x3)**2 + (vehicle.center_y - agent.y3)**2 - collision_threshold
 
-        con4 = loose   # TODO
-        con5 = loose   # TODO
-        con6 = loose   # TODO
+        con4 = sqrt((vehicle.center_x - agent.x1)**2 + (vehicle.center_y - agent.y1)**2 + eps**2) - collision_threshold
+        con5 = sqrt((vehicle.center_x - agent.x2)**2 + (vehicle.center_y - agent.y2)**2 + eps**2) - collision_threshold
+        con6 = sqrt((vehicle.center_x - agent.x3)**2 + (vehicle.center_y - agent.y3)**2 + eps**2) - collision_threshold
 
         # Constraints 7-9: Front vs agent trajectory points
-        con7 = loose   # TODO
-        con8 = loose   # TODO
-        con9 = loose   # TODO
+        con7 = sqrt((vehicle.front_x - agent.x1)**2 + (vehicle.front_y - agent.y1)**2 + eps**2) - collision_threshold
+        con8 = sqrt((vehicle.front_x - agent.x2)**2 + (vehicle.front_y - agent.y2)**2 + eps**2) - collision_threshold
+        con9 = sqrt((vehicle.front_x - agent.x3)**2 + (vehicle.front_y - agent.y3)**2 + eps**2) - collision_threshold
         # ────────────────────────────────────────────────────────────────────
 
         return [con1, con2, con3, con4, con5, con6, con7, con8, con9]
